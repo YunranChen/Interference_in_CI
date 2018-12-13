@@ -1,0 +1,182 @@
+---
+title: "test"
+author: "YunranChen"
+date: "12/5/2018"
+output: html_document
+---
+
+
+
+```{r}
+set.seed(123)
+nbt=500
+Zs = sapply(1:length(gender),function(x){rbernoulli(n = nbt,Z_prob[x])})
+
+#for (zind in 1:nbt){
+testtt=function(zind){
+  ##get Z
+  Z=Zs[zind,]
+  cat(c(zind,mean(G),mean(G[Z==1]),mean(G[Z==0])), "\n", file = "balanceofG5.txt", append = TRUE)
+  ## get X^z
+  Zcovariates = data.frame(Z,gender,age,Friend.Gender,Friend.Age,G,dg)
+Zcovariates = Zcovariates[!is.na(Zcovariates$G),]
+covariateBalance = Zcovariates %>% 
+  mutate(G = rbernoulli(1,G), Z= as.numeric(Z)) %>% tbl_df()
+#check the independence
+model1 = glm(G~.,family = binomial(link='logit'),data = covariateBalance)
+cat(zind,summary(model1)$coefficients["Z",4],"\n",file = "independeZG5.txt",append = TRUE)
+#outcome model
+N = length(G[!is.na(G)])
+Y.potential = array(0,dim=c(N,3))
+delta = c(-5,-8,-10)
+for(d in 1:length(delta)){
+  mu = 15 - 7*(Z_prob[!is.na(G)] >=0.85) - 15*Z[!is.na(G)]+ 3*Z[!is.na(G)]*(Z_prob[!is.na(G)] >=0.85)+delta[d]*G[!is.na(G)]
+  for(i in 1:N){
+    Y.potential[i,d] = rnorm(1,mu[i],1)
+  }
+}
+# true main effect and spillover effect
+true.ce=mean(- 15+ 3*(Z_prob[!is.na(G)] >=0.85))#delta[1]*mean(G[!is.na(G)])
+
+#Xz.formula<- "gender+age"
+Xz.formula="gender+age+Friend.Gender+Friend.Age+dg"
+Xg.formula<-"gender+age+Friend.Gender+Friend.Age+dg"
+
+formulaZ <- as.formula(paste('Z~', Xz.formula))
+formulaG <- as.formula(paste('G~Z+', Xg.formula))
+
+zsim<-c(0,1)
+gsim<-(c(0,quantile(Zcovariates$G, probs = seq(0.1, 0.95, length.out=30-1), na.rm=T)))
+Nzsim<-length(zsim)
+Ngsim<-length(gsim)
+grid_val<-list(zsim=zsim, gsim=gsim)
+grid_points<-data.frame(z=rep(zsim,Nzsim),g=rep(gsim,rep(Nzsim,Ngsim))) 
+ylim<-c(-11,17)
+
+cis=sapply(1:length(delta),function(yind){
+  Zcovariates$Y<-Y.potential[,yind]
+  Zcovariates$GG<-Zcovariates$G
+data = Zcovariates%>%dplyr::select(-G)
+data$Z = as.numeric(data$Z)
+formulaY<-as.formula(paste('Y~Z+GG+', Xz.formula))
+Ymod<-lm(formulaY, data=data)
+mYzg.pois<-matrix(NA, nrow=Nzsim, ncol=Ngsim)
+for(i in 1:Nzsim){
+	for(j in 1:Ngsim){
+  	z<-zsim[i]
+	  g<-gsim[j]
+	  mYzg.pois[i,j]<-	mean(predict(Ymod, newdata=transform(data, Z=z,GG=g), type='response'))
+	}
+}
+## method 6 (1)mdYz
+formulaZ<-as.formula(paste('Z~', Xz.formula))
+formulaG<-as.formula(paste('GG~Z+', Xg.formula))
+formulaY<-as.formula('Y~Z+GG+I(GG^2)+I(GG^3)+gpsG+I(gpsG^2)+I(gpsG^3)+I(GG*gpsG)')
+
+out.neigh.gps.boot  <- neigh.gps.boot  (Y = Y,
+																	 ind.treat = Z,
+																	 neigh.treat = GG,
+																	 ind.treat_formula = eval(formulaZ),
+																	 neigh.treat_formula = eval(formulaG),
+																	 outcome_formula = eval(formulaY),
+																	 data = data,
+																	 grid_val = grid_val,
+																	 ind.treat_mod = 'Binomial',
+																	 neigh.treat_mod = 'Normal',
+																	 outcome_mod = 'lm',
+                                   outcome_family='Normal',
+																	 ind.gps_method='subclass', 
+																	 nclasses=5,
+                                   pred.full.data=T)
+
+
+mYzg.gps.boot<-apply(out.neigh.gps.boot$Yzg.bar,c(1,2),mean)
+q0.025Yzg<-apply(out.neigh.gps.boot$Yzg.bar,c(1,2),quantile, probs=0.025)
+q0.975Yzg<-apply(out.neigh.gps.boot$Yzg.bar,c(1,2),quantile, probs=0.975)
+# Average Treatment Effect \tau=\int E[Y(1,g)-Y(0,g)]P(G=g)
+mdYz<-apply(out.neigh.gps.boot$dYz,1,mean)
+q0.025dYz<-apply(out.neigh.gps.boot$dYz,1,quantile, probs=0.025)
+q0.975dYz<-apply(out.neigh.gps.boot$dYz,1,quantile, probs=0.975)
+
+## method 6 (1)dYz
+formulaZ<-as.formula(paste('Z~', Xz.formula))
+formulaG<-as.formula(paste('GG~Z+', Xg.formula))
+formulaY<-as.formula('Y~Z+GG+I(GG^2)+I(GG^3)+gpsZ+I(gpsZ^2)+I(gpsZ^3)+gpsG+I(gpsG^2)+I(gpsG^3)+I(GG*gpsG)')
+#formulaY<-as.formula('Y~Z+GG+gpsG')
+#data = data %>% mutate(GG = G) 
+out.neigh.gps.boot  <- neigh.gps.boot  (Y = Y,
+																	 ind.treat = Z,
+																	 neigh.treat = GG,
+																	 ind.treat_formula = eval(formulaZ),
+																	 neigh.treat_formula = eval(formulaG),
+																	 outcome_formula = eval(formulaY),
+																	 data = data,
+																	 grid_val = grid_val,
+																	 ind.treat_mod = 'Binomial',
+																	 neigh.treat_mod = 'Normal',
+																	 outcome_mod = 'lm',
+                                   outcome_family='Normal',
+                                   ind.gps_method='none',
+																	 bootstrap = NULL,
+                                   pred.full.data=T)
+
+
+mYzg.gps.boot<-apply(out.neigh.gps.boot$Yzg.bar,c(1,2),mean)
+# Average Treatment Effect \tau=\int E[Y(1,g)-Y(0,g)]P(G=g)
+dYz<-apply(out.neigh.gps.boot$dYz,1, mean)
+
+##method 1
+m1=mean(Zcovariates[Zcovariates$Z==1,'Y']) - mean(Zcovariates[Zcovariates$Z==0,'Y'])
+
+##method 2
+Zcov=Zcovariates
+Zcov$Z=as.numeric(Zcov$Z)
+model = lm(Y~Z + gender + age, data = Zcov)
+data = model.matrix(model)
+data[,'Z'] = 1
+Y.treat = mean(predict(model,newdata =data.frame(data[,2:4]),type='response' ))
+data[,'Z'] = 0
+Y.control = mean(predict(model,newdata =data.frame(data[,2:4]),type='response' ))
+m2=Y.treat - Y.control
+
+##method 3
+data_Z = Zcov
+model = lm(Z~ gender + age, data = data_Z)
+data_Z$pps = model$fitted.values
+data_Z <- data_Z %>% mutate(block = ntile(pps,5))
+m3=data_Z %>%
+  group_by(block) %>% 
+  summarise_at(funs(mean(.[Z == 1]) -mean(.[Z == 0])),.vars = c('Y')) %>% 
+  summarise(m = mean(Y)) %>%
+  .$m
+
+##method 4
+model = lm(Y~Z + gender + age+Friend.Age + Friend.Gender+dg, data = Zcov)
+data = model.matrix(model)
+data[,'Z'] = 1
+Y.treat = mean(stats::predict(model,newdata =data.frame(data[,2:7]),type='response' ))
+data[,'Z'] = 0
+Y.control = mean(stats::predict(model,newdata =data.frame(data[,2:7]),type='response' ))
+m4=Y.treat - Y.control
+
+##method 5
+data_Z = Zcov
+model = lm(Z~ gender + age+Friend.Age + Friend.Gender+dg, data = data_Z)
+data_Z$pps = model$fitted.values
+data_Z <- data_Z %>% mutate(block = ntile(pps,5))
+m5=data_Z %>%
+  group_by(block) %>% 
+  summarise_at(funs(mean(.[Z == 1])-mean(.[Z == 0])),.vars = c('Y')) %>% 
+  summarise(m = mean(Y)) %>%
+  .$m
+return(c(yind,m1,m2,m3,m4,m5,mdYz,dYz))
+})
+
+cis.vec=cis%>%as.vector(.)
+#return(c(zind,cis.vec))
+cat(c(zind,cis.vec), "\n", file = "res5.txt", append = TRUE)
+}
+for (zind in 1:nbt){try(testtt(zind))}
+
+```
+

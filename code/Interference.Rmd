@@ -1,0 +1,528 @@
+---
+title: "Interference"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(statnet)
+library(ergm)
+library(stringr)
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(data.table)
+library(boot)
+library(MatchIt)
+library(Matching)
+library(igraph)
+library(ggplot2)
+```
+
+```{r}
+source('NeighGPS2stage.subclass.opts.Bootstrap.R')
+source('NeighGPSfunctions.subclass.opts.Bootstrap.R')
+```
+
+
+
+```{r}
+dat=read.csv('facebook_combined.txt',header=F,sep=' ')
+g=graph.data.frame(dat,directed=FALSE)
+#plot(g,vertex.cex=0.1)
+```
+
+```{r}
+vcount(g)
+```
+
+```{r}
+plot(degree_distribution(g,cumulative = F))
+```
+
+
+```{r}
+network.features = list(); j =1;
+for(i in c(0,107,348,414,686,698,1684,1912,3437,3980)){
+  ego0 = read.csv(paste0('facebook/',i,'.egofeat'),sep=' ',header = F)
+  feature0 = read.csv(paste0('facebook/',i,'.feat'),sep=' ',header = F)
+  feature0.name = read.csv(paste0('facebook/',i,'.featnames'),sep=' ',header = F)
+  network1.features = rbind(ego0,feature0)
+  colnames(network1.features)[2:dim(network1.features)[2]]<- feature0.name %>% 
+    mutate(splits = str_split(V2,';')) %>% 
+    rowwise() %>% 
+    mutate(
+      identifier = paste(c(splits[-length(splits)],V4),collapse='_')
+    ) %>% .$identifier
+  network.features[[j]] <- network1.features
+  j <- j + 1;
+}
+
+```
+
+
+```{r}
+rbind.all.columns <- function(x, y) {
+ 
+    x.diff <- setdiff(colnames(x), colnames(y))
+    y.diff <- setdiff(colnames(y), colnames(x))
+ 
+    x[, c(as.character(y.diff))] <- 0
+ 
+    y[, c(as.character(x.diff))] <- 0
+ 
+    return(rbind(x, y))
+}
+networks = network.features %>% reduce(rbind.all.columns) %>% filter(V1 %in% get.vertex.attribute(g,'name')) %>% filter (! duplicated(V1))
+networks = networks[order(networks$V1),]
+```
+
+
+```{r}
+dat$V1 = dat$V1 + 1
+dat$V2 = dat$V2 + 1
+fbnet <- as.network(x = dat, # the network object
+                  directed = F, # specify whether the network is directed
+                  loops = FALSE, # do we allow self ties (should not allow them)
+                  matrix.type = "edgelist", # the type of input
+                  vertex.attrnames = 1:4039
+)
+networks$V1 = 1:4039
+
+
+education_type = networks %>% 
+  dplyr::select(V1,education_type_53:education_type_55) %>%
+  mutate(education_type = paste0(education_type_53,education_type_54,education_type_55)) %>%
+  .$education_type
+education_type = as.numeric(education_type) %>% recode('10'=2,'11'=3,'100'=4,'101'=5,'110'=6,'111'=7,'0'=0,'1'=1) 
+network::set.vertex.attribute(fbnet,'Education_type',education_type)
+
+gender = networks %>% 
+  dplyr::select(V1,starts_with('gender')) %>%
+  mutate(gender = paste0(gender_77,gender_78)) %>%
+  .$gender
+gender = as.numeric(gender) %>% recode('10'=2,'1'=1)
+network::set.vertex.attribute(fbnet,'gender',gender)
+
+
+ht = networks %>% 
+  dplyr::select(starts_with('birthday')) 
+  
+age = lapply(colnames(ht)[apply(ht,1,which.max)],function(x) str_split(x, '_',simplify = T)[length(str_split(x, '_',simplify = T))]) %>% unlist()
+age = as.numeric(age) %>% recode("0"=0,'1'=1,'2'=2,'208'=3,'209'=4,'210'=5,'3'=6,'377'=7,'4'=8,'5'=9,'6'=10,'7'=11,.default =12)
+network::set.vertex.attribute(fbnet,'age',age)
+
+ht = networks %>% 
+  dplyr::select(starts_with('hometown_id')) 
+
+hometown = lapply(colnames(ht)[apply(ht,1,which.max)],function(x) str_split(x, '_',simplify = T)[length(str_split(x, '_',simplify = T))]) %>% unlist()
+hometown = as.numeric(hometown) %>% recode("79"=0,'84'=1,'908'=2,'935'=3,'84'=4,.default =5)
+network::set.vertex.attribute(fbnet,'hometown',hometown)
+
+```
+
+
+```{r}
+par(mfrow=c(1,1)) # Back to 1-panel plots
+plot(fbnet, vertex.col='gender')
+legend('bottomleft',fill=1:2,legend=paste('gender',1:2),cex=0.75)
+```
+
+
+```{r}
+par(mfrow=c(1,1)) # Back to 1-panel plots
+plot(fbnet, vertex.col='age')
+legend('bottomleft',fill=0:12,legend=paste('age',0:12),cex=0.75)
+```
+
+
+## Scenario 2 
+
+
+
+```{r}
+g = graph.data.frame(dat,directed=FALSE,vertices=1:4039)
+G = NULL;Friend.Gender = NULL;Friend.Hometown = NULL;Friend.Education = NULL;Friend.Age = NULL;dg = NULL
+N=4039
+for(i in V(g)){
+  neigh = neighbors(g,v = i)
+  Friend.Gender[i] = mean(gender[neigh])
+  Friend.Age[i] = mean(age[neigh])
+  dg[i] = mean(degree(g,v=i))
+}
+#beta1=-4.5
+#beta2=0.4
+#beta3=0.1
+#beta4=2.5
+#beta5=0.3
+
+beta1=-5
+beta2=0.5
+beta3=0.1
+beta4=2.5
+beta5=0.4
+#
+#beta1=-60
+#beta2=5
+#beta3=1
+#beta4=25
+#beta5=4
+
+set.seed(123)
+Z_prob = exp(beta1+beta2*gender+beta3*age+beta4*Friend.Gender+beta5*Friend.Age)/(1+exp(beta1+beta2*gender+beta3*age+beta4*Friend.Gender+beta5*Friend.Age))
+Z = map_dbl(1:length(gender),function(x){rbernoulli(n = 1,Z_prob[x])})
+
+ggplot(data.frame(pps = Z_prob, trt = as.integer(Z)), aes(x=pps,group=trt,color=trt)) +
+  geom_density() +
+  ggtitle('propensity scores')
+#ggsave(filename = paste0(beta1,"_",beta2,"_",beta3,"_",beta4,"_",beta5,".pdf"))
+
+for (i in 1:N){
+  neigh = neighbors(g,v = i)
+    G[i] = mean(Z[neigh])
+}
+     
+c(mean(G[Z==T],na.rm = T),mean(G[Z==F],na.rm = T),mean(G,na.rm = T))
+
+```
+
+
+
+
+
+  
+  
+```{r}
+Zcovariates = data.frame(Z,gender,age,Friend.Gender,Friend.Age,G,dg)
+Zcovariates = Zcovariates[!is.na(Zcovariates$G),]
+covariateBalance = Zcovariates %>% group_by(Z) %>% summarise_all(mean) %>% t()
+d = dim(covariateBalance)[1]
+covariatestd = Zcovariates  %>% group_by(Z) %>% summarise_all(var) %>% t()
+covariate = data.frame(cbind(covariateBalance[2:d,c(2,1)],(covariateBalance[2:d,2] - covariateBalance[2:d,1])/sqrt(covariatestd[2:d,1]+covariatestd[2:d,2])))
+colnames(covariate) <- c('Treated','Control','Stand.Diff')
+#rownames(covariate) <- c('Gender','Hometown','Friends.Hometown','Friends.Gender','G')
+knitr::kable(covariate,caption = 'Covariate Balance across individual treatment arms')
+```
+
+```{r}
+covariateBalance = Zcovariates %>% 
+  mutate(G = ifelse(G>=0.5,1,0)) %>%
+  group_by(G) %>% summarise_all(mean) %>% t()
+covariatestd = Zcovariates  %>% group_by(Z) %>% summarise_all(var) %>% t()
+covariate = data.frame(cbind(covariateBalance[2:d,c(2,1)],(covariateBalance[2:d,2] - covariateBalance[2:d,1])/sqrt(covariatestd[2:d,1]+covariatestd[2:d,2])))
+colnames(covariate) <- c('Treated','Control','Stand.Diff')
+#rownames(covariate) <- c('Z','Gender','Hometown','Friends.Hometown','Friends.Gender')
+knitr::kable(covariate,caption = 'Covariate balance across dichotomized neighborhood treatment arms')
+```
+
+
+```{r}
+set.seed(123)
+Zcovariates = data.frame(Z,gender,age,Friend.Gender,Friend.Age,G,dg)
+covariateBalance = Zcovariates %>% 
+  mutate(G = rbernoulli(1,G), Z= as.numeric(Z)) %>% tbl_df()
+
+model1 = glm(G~.-Friend.Age-Friend.Gender,family = binomial(link='logit'),data = covariateBalance)
+summary(model1)
+model1 = glm(G~.,family = binomial(link='logit'),data = covariateBalance)
+summary(model1)
+psi=predict(model1,newdata = covariateBalance,type = "response")
+
+ndata=covariateBalance
+ndata$gender=1
+ndata$Z=0
+abc=NULL
+
+  for (j in 0:7){
+    ndata$age=j
+    abc=c(abc,predict(model1,newdata = ndata,type = "response"))
+}
+abc2=abc
+abc1=abc
+dfabc=data_frame(g=rep(Zcovariates$G,32),psi=c(abc1,abc2),gender=rep(c("gender1","gender2"),each=N*16),group=rep(rep(1:16,each=N),2))
+ggplot(dfabc%>%filter(group==2),mapping = aes(x=g,y=psi))+geom_line()+facet_grid(.~gender)
+abcabc=data_frame(g=Zcovariates$G,psi=abc)
+ggplot(abcabc,mapping = aes(x=g,y=psi))+geom_line()
+length(abc)
+length(abc)/N
+#colnames(covariate) <- c('Treated','Control','Stand.Diff')
+#rownames(covariate) <- c('Z','Race','Grade','Friends.Grade','Friends.Race','Degree')
+#knitr::kable(covariate,caption = 'Covariate balance across dichotomized neighborhood treatment arms')
+i=1
+j=1
+length(abc)
+```
+
+
+
+
+# Scenario 1   
+
+The individual treatment $Z_i$ is generated depending on individual gender and age
+
+# Scenario 2
+
+## Simulate Outcome
+
+```{r}
+N = length(G[!is.na(G)])
+Y.potential = array(0,dim=c(N,3))
+delta = c(-5,-8,-10)
+for(d in 1:length(delta)){
+  mu = 15 - 7*(Z_prob[!is.na(G)] >=0.5) - 15*Z[!is.na(G)]+ 3*Z[!is.na(G)]*(Z_prob[!is.na(G)] >=0.5)+delta[d]*G[!is.na(G)]
+  for(i in 1:N){
+    Y.potential[i,d] = rnorm(1,mu[i],1)
+  }
+}
+# true main effect and spillover effect
+c(mean(- 15+ 3*(Z_prob[!is.na(G)] >=0.5)),delta[1]*mean(G[!is.na(G)]))
+trueme=mean(- 15+ 3*(Z_prob[!is.na(G)] >=0.5))
+```
+
+
+```{r}
+N = length(G[!is.na(G)])
+Y.potential = array(0,dim=c(N,3))
+delta = c(-5,-8,-10)
+for(d in 1:length(delta)){
+  mu = 15 - Friend.Age+7*Friend.Gender-10*(Z_prob[!is.na(G)] >=0.7)-10*Z-10*psi+5*G*(Z_prob[!is.na(G)] >=0.7) + 3*Z[!is.na(G)]*(G[!is.na(G)] >=0.7)+delta[d]*G[!is.na(G)]
+  for(i in 1:N){
+    Y.potential[i,d] = rnorm(1,mu[i],1)
+  }
+}
+# true main effect and spillover effect
+mean(- 10+ 3*G)
+trueme=mean(- 10+ 3*G)
+
+```
+
+
+
+
+```{r}
+Xz.formula<- "gender+age"
+Xg.formula<-"gender+age+Friend.Gender+Friend.Age+dg"
+
+formulaZ <- as.formula(paste('Z~', Xz.formula))
+formulaG <- as.formula(paste('G~Z+', Xg.formula))
+
+zsim<-c(0,1)
+gsim<-(c(0,quantile(Zcovariates$G, probs = seq(0.1, 0.95, length.out=30-1), na.rm=T)))
+Nzsim<-length(zsim)
+Ngsim<-length(gsim)
+grid_val<-list(zsim=zsim, gsim=gsim)
+grid_points<-data.frame(z=rep(zsim,Nzsim),g=rep(gsim,rep(Nzsim,Ngsim))) 
+
+Zcovariates$Y<-Y.potential[,1]
+
+ylim<-c(-11,17)
+```
+
+
+Dose Function 
+
+```{r}
+Zcovariates$GG<-Zcovariates$G
+data = Zcovariates%>%dplyr::select(-G)
+data$Z = as.numeric(data$Z)
+formulaY<-as.formula(paste('Y~Z+GG+', Xz.formula))
+Ymod<-lm(formulaY, data=data)
+mYzg.pois<-matrix(NA, nrow=Nzsim, ncol=Ngsim)
+for(i in 1:Nzsim){
+	for(j in 1:Ngsim){
+  	z<-zsim[i]
+	  g<-gsim[j]
+	  mYzg.pois[i,j]<-	mean(predict(Ymod, newdata=transform(data, Z=z,GG=g), type='response'))
+	}
+}
+par(mfrow=c(1,2))
+plot(gsim, mYzg.pois[1,],type='l', xlab='g', ylab='Y(0,g)', ylim=ylim)
+plot(gsim, mYzg.pois[2,],type='l', xlab='g',ylab='Y(1,g)', ylim=ylim)
+par(mfrow=c(1,1))
+
+```
+
+
+
+```{r}
+formulaZ<-as.formula(paste('Z~', Xz.formula))
+formulaG<-as.formula(paste('GG~Z+', Xg.formula))
+formulaY<-as.formula('Y~Z+GG+I(GG^2)+I(GG^3)+gpsG+I(gpsG^2)+I(gpsG^3)+I(GG*gpsG)')
+
+out.neigh.gps.boot  <- neigh.gps.boot  (Y = Y,
+																	 ind.treat = Z,
+																	 neigh.treat = GG,
+																	 ind.treat_formula = eval(formulaZ),
+																	 neigh.treat_formula = eval(formulaG),
+																	 outcome_formula = eval(formulaY),
+																	 data = data,
+																	 grid_val = grid_val,
+																	 ind.treat_mod = 'Binomial',
+																	 neigh.treat_mod = 'Normal',
+																	 outcome_mod = 'lm', #"lm"
+                                   outcome_family='Normal',
+																	 ind.gps_method='subclass', 
+																	 nclasses=5,
+                                   pred.full.data=T,
+																	 link_function = "logit")
+
+
+mYzg.gps.boot<-apply(out.neigh.gps.boot$Yzg.bar,c(1,2),mean)
+q0.025Yzg<-apply(out.neigh.gps.boot$Yzg.bar,c(1,2),quantile, probs=0.025)
+q0.975Yzg<-apply(out.neigh.gps.boot$Yzg.bar,c(1,2),quantile, probs=0.975)
+
+par(mfrow=c(1,2))
+plot(gsim, mYzg.gps.boot[1,],type='l', xlab='g', ylab='Y(0,g)', ylim=ylim)
+polygon(c(gsim,rev(gsim)),c(q0.025Yzg[1,],rev(q0.975Yzg[1,])),border=NA,col=blues9[3])
+lines(gsim,mYzg.gps.boot[1,], type='l')
+
+plot(gsim, mYzg.gps.boot[2,],type='l', xlab='g', ylab='Y(1,g)', ylim=ylim)
+polygon(c(gsim,rev(gsim)),c(q0.025Yzg[2,],rev(q0.975Yzg[2,])),border=NA,col=blues9[3])
+lines(gsim,mYzg.gps.boot[2,], type='l')
+par(mfrow=c(1,1))
+
+
+# Average Treatment Effect \tau=\int E[Y(1,g)-Y(0,g)]P(G=g)
+mdYz<-apply(out.neigh.gps.boot$dYz,1,mean)
+q0.025dYz<-apply(out.neigh.gps.boot$dYz,1,quantile, probs=0.025)
+q0.975dYz<-apply(out.neigh.gps.boot$dYz,1,quantile, probs=0.975)
+
+
+# Average Spillover Effect \Delta(z)=\int E[Y(z,g)-Y(z,0)]P(G=g)
+mYzg_Yz0<-apply(out.neigh.gps.boot$mYzg_Yz0,1, mean)
+q0.025.mYzg_Yz0<-apply(out.neigh.gps.boot$mYzg_Yz0,1,quantile, probs=0.025)
+q0.975.mYzg_Yz0<-apply(out.neigh.gps.boot$mYzg_Yz0,1,quantile, probs=0.975)
+
+#Check Balance
+#summary(out.neigh.gps.boot$match.mod[[1]])
+
+c(mdYz,mYzg_Yz0)
+-13.508447  -5.815126  -5.818051
+```
+
+
+
+```{r}
+formulaZ<-as.formula(paste('Z~', Xz.formula))
+formulaG<-as.formula(paste('GG~Z+', Xg.formula))
+formulaY<-as.formula('Y~Z+GG+I(GG^2)+I(GG^3)+gpsZ+I(gpsZ^2)+I(gpsZ^3)+gpsG+I(gpsG^2)+I(gpsG^3)+I(GG*gpsG)')
+#formulaY<-as.formula('Y~Z+GG+gpsG')
+#data = data %>% mutate(GG = G) 
+out.neigh.gps.boot  <- neigh.gps.boot  (Y = Y,
+																	 ind.treat = Z,
+																	 neigh.treat = GG,
+																	 ind.treat_formula = eval(formulaZ),
+																	 neigh.treat_formula = eval(formulaG),
+																	 outcome_formula = eval(formulaY),
+																	 data = data,
+																	 grid_val = grid_val,
+																	 ind.treat_mod = 'Binomial',
+																	 neigh.treat_mod = 'Normal',
+																	 outcome_mod = 'lm',
+                                   outcome_family='Normal',
+                                   ind.gps_method='none',
+																	 bootstrap = NULL,
+                                   pred.full.data=T)
+
+
+mYzg.gps.boot<-apply(out.neigh.gps.boot$Yzg.bar,c(1,2),mean)
+
+par(mfrow=c(1,2))
+plot(gsim, mYzg.gps.boot[1,],type='l', xlab='g', ylab='Y(0,g)', ylim=ylim)
+plot(gsim, mYzg.gps.boot[2,],type='l', xlab='g',ylab='Y(1,g)', ylim=ylim)
+par(mfrow=c(1,1))
+
+# Average Treatment Effect \tau=\int E[Y(1,g)-Y(0,g)]P(G=g)
+dYz<-apply(out.neigh.gps.boot$dYz,1, mean)
+
+# Average Spillover Effect \Delta(z)=\int E[Y(z,g)-Y(z,0)]P(G=g)
+mYzg_Yz0<-apply(out.neigh.gps.boot$mYzg_Yz0,1, mean)
+
+c(dYz,mYzg_Yz0)
+```
+
+
+
+
+# Main Effect
+
+## Comparison with other approaches
+
+1. A simple difference in mean estimator comparing treated and untreated units;
+
+```{r}
+mean(Zcovariates[Zcovariates$Z==1,'Y']) - mean(Zcovariates[Zcovariates$Z==0,'Y'])
+```
+
+
+2. An OLS estimator that regresses the outcome on individual treatment $Z_i$, adjusting only for individual covariates $X_i^{ind}$
+
+```{r}
+model = lm(Y~Z + gender + age, data = Zcovariates)
+data = model.matrix(model)
+#data=Zcovariates
+data[,'Z'] = 1
+Y.treat = mean(stats::predict(object=model,newdata =data.frame(data[,2:4]),type='response' ))
+data[,'Z'] = 0
+Y.control = mean(stats::predict(model,newdata =data.frame(data[,2:4]),type='response' ))
+Y.treat - Y.control
+```
+
+3. An estimator based on a subclassification on the individual propensity score which is estimated using only individual covariates.
+
+```{r}
+data_Z = Zcovariates
+model = lm(Z~ gender + age, data = data_Z)
+data_Z$pps = model$fitted.values
+data_Z <- data_Z %>% mutate(block = ntile(pps,5))
+data_Z %>%
+  group_by(block) %>% 
+  summarise_at(funs(mean(.[Z == 1]) -mean(.[Z == 0])),.vars = c('Y')) %>% 
+  summarise(m = mean(Y)) %>%
+  .$m
+```
+
+4. OLS Estimator that regresses the outcome on individual treatment  $Z_i$ adjusting for individual covariates and neighborhood covariates.
+
+```{r}
+model = lm(Y~Z + gender + age+Friend.Age + Friend.Gender+dg, data = Zcovariates)
+data = model.matrix(model)
+data[,'Z'] = 1
+Y.treat = mean(stats::predict(model,newdata =data.frame(data),type='response' ))
+data[,'Z'] = 0
+Y.control = mean(stats::predict(model,newdata =data.frame(data),type='response' ))
+Y.treat - Y.control
+```
+
+5. An estimator based on a subclassification on the individual propensity score which is estimated using only individual covariates and neighborhood covariates.
+
+
+```{r}
+data_Z = Zcovariates
+model = glm(Z~gender + age+Friend.Age + Friend.Gender+dg,family = binomial(link='logit'),data = data_Z)
+data_Z$pps=predict(model,newdata = data_Z,type = "response")
+data_Z <- data_Z %>% mutate(block = ntile(pps,5))
+data_Z %>%
+  group_by(block) %>% 
+  summarise_at(funs(mean(.[Z == 1])-mean(.[Z == 0])),.vars = c('Y')) %>% 
+  summarise(m = mean(Y)) %>%
+  .$m
+
+```
+
+```{r}
+#trueme=-14.163654
+#trueme=-14.163654
+results=read.table(file = "res5.txt",stringsAsFactors = FALSE)
+res_=apply(results,2,function(x){c(mean(x),sqrt(mean((x-trueme)^2)))})
+res_=res_[,-1]
+res_df=data.frame(val=c((res_[1,]-trueme),res_[2,]),par=rep(c("Bias","RMSE"),each=24),interference=rep(rep(c("low","medium","high"),each=8),2),estimator=rep(c("Index","Unadjusted","RegressionXind","SubclassXind","RegressionXz","SubclassXz","SubclassGPS1","SubclassGPS2"),3))
+res_df=res_df%>%filter(estimator!="Index")
+write.csv(res_df,file = "res_df5.csv")
+```
+
+
